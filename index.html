@@ -186,6 +186,7 @@ a.chip:hover{border-color:var(--accent)}
 .ptabs a.on{color:var(--fg);border-color:var(--accent)} .ptabs a:hover{color:var(--fg)}
 .ptabs a .mono{font-size:12px;color:var(--muted);margin-left:2px}
 .upd{display:grid;gap:4px;min-width:0}
+.cstat{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pcols{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:32px}
 .tl{display:grid;grid-template-columns:36px minmax(0,1fr) auto;gap:12px;align-items:center;padding-block:9px;border-bottom:1px solid var(--line);font-size:14px}
 .tl .poster{width:36px}
@@ -305,7 +306,7 @@ async function rate(id,r,quiet){
   if(r){ S.ratings[id]=r; if(!S.watched.includes(id))S.watched.push(id); S.watchlist=S.watchlist.filter(x=>x!==id) } else delete S.ratings[id];
   save();
   if(sb){
-    const {error}=await (r?sb.from("ratings").upsert({user_id:uid,film_id:id,rating:r})
+    const {error}=await (r?sb.from("ratings").upsert({user_id:uid,film_id:id,rating:r,updated_at:new Date().toISOString()})
                           :sb.from("ratings").delete().eq("user_id",uid).eq("film_id",id));
     if(error) toast("Couldn't save your rating. Check your connection.");
   }
@@ -409,6 +410,39 @@ function renderHeader(view){
 }
 
 /* ===== Views ===== */
+
+/* ===== Community rankings, built only from Scenelet members' ratings ===== */
+async function allRatings(){
+  if(sb){
+    const {data,error}=await sb.from("ratings").select("user_id,film_id,rating,updated_at").limit(20000);
+    if(error) throw error;
+    return data.map(r=>({user:r.user_id,film:r.film_id,rating:+r.rating,at:Date.parse(r.updated_at)||0}));
+  }
+  const out=[];
+  for(const u in users){
+    const d=LS.get("scenelet.data."+u,{});
+    for(const id in (d.ratings||{})){
+      const a=(d.activity||[]).find(x=>x.t==="rated"&&x.film==id);
+      out.push({user:u,film:+id,rating:d.ratings[id],at:a?a.at:0});
+    }
+  }
+  return out;
+}
+async function community(){
+  const rs=await allRatings(), by={}, weekAgo=Date.now()-7*864e5;
+  for(const r of rs){ const f=by[r.film]||(by[r.film]={id:r.film,sum:0,n:0,week:0}); f.sum+=r.rating; f.n++; if(r.at>=weekAgo) f.week++ }
+  const list=Object.values(by).map(f=>({...f,avg:f.sum/f.n}));
+  const top=[...list].sort((a,b)=>b.avg-a.avg||b.n-a.n).slice(0,20);
+  const popular=list.filter(f=>f.week).sort((a,b)=>b.week-a.week||b.avg-a.avg).slice(0,10);
+  const need=[...new Set([...top,...popular].map(f=>f.id))];
+  const films=Object.fromEntries((await Promise.all(need.map(id=>api("/movie/"+id).catch(()=>null)))).filter(Boolean).map(m=>[m.id,m]));
+  const attach=arr=>arr.filter(f=>films[f.id]).map(f=>({...f,m:films[f.id]}));
+  return {top:attach(top),popular:attach(popular),members:new Set(rs.map(r=>r.user)).size};
+}
+function commCard(x,sub){
+  return `<div class="upd">${card(x.m)}<span class="cstat"><span class="stars">★</span> <b class="mono">${x.avg.toFixed(1)}</b> <span class="muted">· ${sub}</span></span></div>`;
+}
+
 let browse={genre:"",decade:"",country:"",sort:"popularity.desc",page:1,total:1};
 let pf={filter:"all",sort:"recent"};
 const ACTSHORT={rated:"Rated",watched:"Watched",liked:"Liked",watchlist:"Watchlisted",logged:"Logged",reviewed:"Reviewed",listed:"Added to list",fav:"Favourited"};
@@ -434,8 +468,10 @@ function dayLabel(at){
 }
 const V={
 async home(){
-  const [trend,now,top,gs]=await Promise.all([api("/trending/movie/week"),api("/movie/now_playing",{region:REGION}),topRated(1),genres()]);
-  const feat=trend.results.find(m=>m.backdrop_path)||trend.results[0];
+  const [trend,now,gs,comm]=await Promise.all([api("/trending/movie/week"),api("/movie/now_playing",{region:REGION}),genres(),community().catch(()=>null)]);
+  const pop=comm?comm.popular:[], top=comm?comm.top:[];
+  const feat=(pop.find(x=>x.m.backdrop_path)||{}).m||trend.results.find(m=>m.backdrop_path)||trend.results[0];
+  const featLabel=pop.some(x=>x.m===feat)?"#1 on Scenelet this week":"Trending worldwide";
   const seen=new Set(), recent=S?S.activity.filter(a=>S.films[a.film]&&!seen.has(a.film)&&seen.add(a.film)).slice(0,10):[];
   const heroTxt=me
     ?`<span class="tag">Welcome back, ${esc(me)}</span><h1>What did you watch today?</h1>
@@ -443,17 +479,22 @@ async home(){
       <div class="spot-btns"><a class="btn" href="#/films">Find a film</a><button class="btn glass" data-act="onboard">Rate popular films</button></div>`
     :`<span class="tag">Your film diary</span><h1>Every film you watch, kept frame by frame.</h1><p>Rate, review and log films from every country. Build a watchlist, make lists and see what other members think.</p>
       <div class="spot-btns"><button class="btn" data-act="auth" data-tab="up">Create a free account</button><a class="btn glass" href="#/films">Browse films</a></div>`;
+  const members=comm?comm.members:0;
   return `<section class="spot" style="${feat&&feat.backdrop_path?`background-image:url('${IMG}w1280${esc(feat.backdrop_path)}')`:""}">
     <div class="spot-in">${heroTxt}</div>
-    ${feat?`<a class="spot-feat" href="#/film/${feat.id}"><span class="tag">#1 this week</span><b>${esc(feat.title)}</b> <span class="mono">${yearOf(feat)}</span> →</a>`:""}</section>
+    ${feat?`<a class="spot-feat" href="#/film/${feat.id}"><span class="tag">${featLabel}</span><b>${esc(feat.title)}</b> <span class="mono">${yearOf(feat)}</span> →</a>`:""}</section>
   <div class="chips genres">${gs.map(g=>`<a class="chip" href="#/films" data-act="genre" data-genre="${g.id}">${esc(g.name)}</a>`).join("")}</div>
   ${me?`<section class="sec"><div class="sec-head"><h2>Recently updated</h2><a class="link" href="#/profile/activity">Your activity →</a></div>
     ${recent.length?`<div class="row">${recent.map(a=>`<div class="upd">${card(S.films[a.film])}<span class="tag">${ACTSHORT[a.t]||"Updated"} · ${relTime(a.at)}</span></div>`).join("")}</div>`
     :`<div class="empty">Nothing yet. Rate a few popular films to get started.<br><br><button class="btn" data-act="onboard">Rate popular films</button></div>`}</section>`:""}
-  <section class="sec"><div class="sec-head"><h2>Trending this week</h2><a class="link" href="#/films">Browse all →</a></div>
-    <div class="row ranked">${trend.results.slice(0,10).map((m,i)=>`<div class="rk"><span class="num" aria-hidden="true">${i+1}</span>${card(m)}</div>`).join("")}</div></section>
+  <section class="sec"><div class="sec-head"><h2>Popular on Scenelet this week</h2><span class="tag">Most rated by members · last 7 days</span></div>
+    ${pop.length?`<div class="row ranked">${pop.map((x,i)=>`<div class="rk"><span class="num" aria-hidden="true">${i+1}</span>${commCard(x,`${x.week} rating${x.week>1?"s":""} this week`)}</div>`).join("")}</div>`
+    :`<div class="empty">${comm?"No member has rated a film this week yet. Rate one and it shows up here.":"Member ratings can't be loaded right now."}</div>`}</section>
+  <section class="sec"><div class="sec-head"><h2>Highest rated on Scenelet</h2><span class="tag">Average of member ratings${members?` · ${members} member${members>1?"s":""} rating`:""}</span></div>
+    ${top.length?`<div class="row">${top.map(x=>commCard(x,`${x.n} rating${x.n>1?"s":""}`)).join("")}</div>`
+    :`<div class="empty">${comm?"No ratings yet. The best rated films of the community will show up here.":"Member ratings can't be loaded right now."}</div>`}</section>
   <section class="sec"><div class="sec-head"><h2>In cinemas now</h2></div><div class="row">${now.results.map(card).join("")}</div></section>
-  <section class="sec"><div class="sec-head"><h2>All-time highest rated</h2></div><div class="row">${top.results.map(card).join("")}</div></section>`;
+  <section class="sec"><div class="sec-head"><h2>Trending worldwide</h2><span class="tag">From TMDB</span></div><div class="row">${trend.results.map(card).join("")}</div></section>`;
 },
 async films(){
   browse.page=1;

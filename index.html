@@ -362,6 +362,8 @@ function api(path,params={}){
   }).catch(e=>{cache.delete(s); if(e.name==="TypeError"||/fetch|network/i.test(e.message)) throw new Error("Couldn't reach TMDB. Check your connection. If you're viewing this inside a preview panel, download the file and open it in your browser instead."); throw e});
   cache.set(s,pr); return pr;
 }
+/* TMDB's own top-rated list is flooded by new releases with a handful of 10/10 votes, so only count widely rated films */
+const topRated=page=>api("/discover/movie",{sort_by:"vote_average.desc","vote_count.gte":5000,include_adult:false,page});
 let GENRES=null;
 async function genres(){ if(!GENRES) GENRES=(await api("/genre/movie/list")).genres; return GENRES }
 const COUNTRIES=[["","Any country"],["AR","Argentina"],["BE","Belgium"],["BR","Brazil"],["CN","China"],["DK","Denmark"],["EG","Egypt"],["FR","France"],["DE","Germany"],["HK","Hong Kong"],["IN","India"],["IR","Iran"],["IT","Italy"],["JP","Japan"],["MX","Mexico"],["NG","Nigeria"],["PL","Poland"],["RU","Russia"],["SN","Senegal"],["KR","South Korea"],["ES","Spain"],["SE","Sweden"],["TW","Taiwan"],["TH","Thailand"],["TR","Turkey"],["GB","United Kingdom"],["US","United States"]];
@@ -432,7 +434,7 @@ function dayLabel(at){
 }
 const V={
 async home(){
-  const [trend,now,top,gs]=await Promise.all([api("/trending/movie/week"),api("/movie/now_playing",{region:REGION}),api("/movie/top_rated"),genres()]);
+  const [trend,now,top,gs]=await Promise.all([api("/trending/movie/week"),api("/movie/now_playing",{region:REGION}),topRated(1),genres()]);
   const feat=trend.results.find(m=>m.backdrop_path)||trend.results[0];
   const seen=new Set(), recent=S?S.activity.filter(a=>S.films[a.film]&&!seen.has(a.film)&&seen.add(a.film)).slice(0,10):[];
   const heroTxt=me
@@ -649,7 +651,7 @@ async function discover(){
   if(browse.genre)p.with_genres=browse.genre;
   if(browse.country)p.with_origin_country=browse.country;
   if(browse.decade){p["primary_release_date.gte"]=browse.decade+"-01-01";p["primary_release_date.lte"]=(+browse.decade+9)+"-12-31"}
-  if(browse.sort.startsWith("vote_average"))p["vote_count.gte"]=300;
+  if(browse.sort.startsWith("vote_average"))p["vote_count.gte"]=1500;
   if(browse.sort==="primary_release_date.desc"&&!browse.decade)p["primary_release_date.lte"]=today();
   if(browse.sort==="primary_release_date.asc")p["vote_count.gte"]=20;
   const d=await api("/discover/movie",p); browse.total=Math.min(d.total_pages,500); return d;
@@ -701,7 +703,7 @@ async function startOnboarding(){
   OB={films:[],i:0,rated:0,seen:0};
   modal(`<div class="loading" style="padding:40px 0">Finding popular films…</div>`);
   try{
-    const res=await Promise.all([api("/movie/popular",{page:1}),api("/trending/movie/week"),api("/movie/popular",{page:2}),api("/movie/top_rated",{page:1}),api("/movie/popular",{page:3}),api("/movie/top_rated",{page:2})]);
+    const res=await Promise.all([api("/movie/popular",{page:1}),api("/trending/movie/week"),api("/movie/popular",{page:2}),topRated(1),api("/movie/popular",{page:3}),topRated(2)]);
     const seen=new Set();
     OB.films=res.flatMap(r=>r.results).filter(m=>m.poster_path&&!seen.has(m.id)&&seen.add(m.id)&&!S.watched.includes(m.id));
   }catch(e){ OB=null; modal(`<div class="err">${esc(e.message)}</div>`); return }
